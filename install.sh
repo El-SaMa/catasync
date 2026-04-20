@@ -13,8 +13,8 @@ apt-get install -y curl git build-essential
 
 echo "[INFO] Checking Node.js..."
 if ! command -v node >/dev/null 2>&1; then
-  echo "[INFO] Node.js not found, installing Node.js 18..."
-  curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+  echo "[INFO] Node.js not found, installing Node.js 20..."
+  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
   apt-get install -y nodejs
 else
   echo "[INFO] Node.js found: $(node -v)"
@@ -23,7 +23,7 @@ fi
 
 echo "[INFO] Cloning or updating worker repo..."
 WORKER_DIR="/opt/catasync-worker"
-REPO_URL="http://niletech.fi/catasync-worker.git"
+REPO_URL="https://github.com/El-SaMa/catasync.git"
 if [ -d "$WORKER_DIR/.git" ]; then
   cd "$WORKER_DIR"
   git pull --rebase
