@@ -2,7 +2,7 @@
 set -e
 
 # CataSync Node.js Worker Install Script
-# Usage: wget -qO- http://niletech.fi/niletech-catasync-worker/install.sh | bash
+# Usage: curl -L https://raw.githubusercontent.com/El-SaMa/catasync/main/install.sh | bash
 
 
 echo "[INFO] Installing dependencies (curl, git, build-essential)..."
