@@ -22,8 +22,8 @@ fi
 
 
 echo "[INFO] Cloning or updating worker repo..."
-WORKER_DIR="/opt/niletech-catasync-worker"
-REPO_URL="http://niletech.fi/niletech-catasync-worker.git"
+WORKER_DIR="/opt/catasync-worker"
+REPO_URL="http://niletech.fi/catasync-worker.git"
 if [ -d "$WORKER_DIR/.git" ]; then
   cd "$WORKER_DIR"
   git pull --rebase
@@ -74,9 +74,9 @@ echo "  npm start"
 echo ""
 echo "Edit .env to configure RabbitMQ, queues, callback URL, and API keys."
 echo ""
-# (Optional) To run as a service, create /etc/systemd/system/catasync-worker.service:
+ # (Optional) To run as a service, create /etc/systemd/system/catasync-worker.service:
 # [Unit]
-# Description=CataSync Node.js Worker
+# Description=CataSync Worker
 # After=network.target
 #
 # [Service]
