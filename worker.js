@@ -6,6 +6,30 @@ const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
+const { OpenAI } = require('openai');
+// OpenAI API setup
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo'; // cost-effective default
+let openai = null;
+if (OPENAI_API_KEY) {
+  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+}
+
+async function runOpenAICompletion(prompt, opts = {}) {
+  if (!openai) throw new Error('OpenAI API key not set');
+  const model = opts.model || OPENAI_MODEL;
+  const messages = opts.messages || [
+    { role: 'system', content: 'You are a helpful assistant.' },
+    { role: 'user', content: prompt },
+  ];
+  const response = await openai.chat.completions.create({
+    model,
+    messages,
+    max_tokens: opts.max_tokens || 512,
+    temperature: opts.temperature || 0.7,
+  });
+  return response.choices[0]?.message?.content || '';
+}
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL;
 const QUEUES = (process.env.QUEUES || '').split(',').map((q) => q.trim()).filter(Boolean);
@@ -17,6 +41,7 @@ const WP_PATH = path.resolve(__dirname, process.env.WP_PATH || '../public_html')
 const WP_BIN = process.env.WP_BIN || 'wp';
 const IMPORT_TIMEOUT_MS = parseInt(process.env.IMPORT_TIMEOUT_MS || String(20 * 60 * 1000), 10);
 const PREFETCH = Math.max(1, parseInt(process.env.PREFETCH || '1', 10));
+const STATUS_PING_INTERVAL_MS = Math.max(3000, parseInt(process.env.STATUS_PING_INTERVAL_MS || '5000', 10));
 let currentProcess = '';
 
 if (!RABBITMQ_URL || !QUEUES.length || !WP_CALLBACK_URL || !WORKER_SECRET) {
@@ -59,6 +84,8 @@ async function pingStatus() {
   params.set('ram', String((os.totalmem() - os.freemem()) / Math.max(1, os.totalmem())));
   params.set('running', currentProcess ? '1' : '0');
   params.set('process', currentProcess);
+  params.set('current_process', currentProcess);
+  params.set('currentProcess', currentProcess);
   try {
     await axios.post(WP_STATUS_URL, params, { timeout: 10000 });
   } catch (err) {
@@ -130,47 +157,34 @@ function describeJob(queue, job) {
   return `${feature} on ${queue}`;
 }
 
-async function fetchAndAttachImages(productId, job) {
-  // Example: fetch image URLs from supplier API (wave)
-  if (!productId || !job || !job.payload || !job.payload.supplier) return;
-  const supplier = job.payload.supplier;
-  let imageUrls = [];
-
-  // Only handle 'wave' for now
-  if (supplier === 'wave' && job.payload.ean) {
-    // Example: fetch from a supplier API endpoint (replace with real endpoint)
-    try {
-      const resp = await axios.get(`https://api.wave.fi/products/${job.payload.ean}/images`);
-      if (resp.data && Array.isArray(resp.data.images)) {
-        imageUrls = resp.data.images;
-      }
-    } catch (err) {
-      log('image fetch failed', { ean: job.payload.ean, error: err.message });
-    }
+async function fetchImportedProductState(productId) {
+  const pid = parseInt(productId, 10);
+  if (!pid || pid <= 0) {
+    throw new Error('Missing product id for post-import validation.');
   }
 
-  // Attach images to WooCommerce product via WP-CLI
-  for (const url of imageUrls) {
-    try {
-      // Download and attach image
-      const code = `
-        $product_id = ${productId};
-        $image_url = '${url.replace(/'/g, "\\'")}';
-        include_once ABSPATH . 'wp-admin/includes/image.php';
-        include_once ABSPATH . 'wp-admin/includes/file.php';
-        include_once ABSPATH . 'wp-admin/includes/media.php';
-        $attach_id = media_sideload_image($image_url, $product_id, null, 'id');
-        if (!is_wp_error($attach_id)) {
-          set_post_thumbnail($product_id, $attach_id);
-        }
-        echo (int) $attach_id;
-      `;
-      const result = await wpEval(code);
-      log('attached image', { productId, url, attach_id: String(result.stdout || '').trim() });
-    } catch (err) {
-      log('image attach failed', { productId, url, error: err.message });
+  const code = `
+    $pid = ${pid};
+    $p = get_post( $pid );
+    if ( ! $p || 'product' !== $p->post_type ) {
+      fwrite( STDERR, 'Imported product not found.' );
+      exit( 30 );
     }
-  }
+    $thumb = (int) get_post_thumbnail_id( $pid );
+    $gallery_raw = (string) get_post_meta( $pid, '_product_image_gallery', true );
+    $gallery = array_values( array_filter( array_map( 'intval', explode( ',', $gallery_raw ) ) ) );
+    echo wp_json_encode( array(
+      'title' => get_the_title( $pid ),
+      'desc' => (string) $p->post_content,
+      'short_desc' => (string) $p->post_excerpt,
+      'thumbnail_id' => $thumb,
+      'gallery_count' => count( $gallery ),
+      'image_count' => ( $thumb > 0 ? 1 : 0 ) + count( $gallery ),
+    ) );
+  `;
+
+  const result = await wpEval(code);
+  return JSON.parse(result.stdout || '{}');
 }
 
 async function handleJob(queue, job) {
@@ -181,17 +195,40 @@ async function handleJob(queue, job) {
   }
 
   const stagingId = job.payload && job.payload.staging_id;
+  currentProcess = `Import staging #${stagingId}: enrich and create product`;
+  await pingStatus();
   const productId = await importStagingId(stagingId);
-  // Fetch and attach images after import
-  await fetchAndAttachImages(productId, job);
+  currentProcess = `Import staging #${stagingId}: validate enrichment and images`;
+  await pingStatus();
+  const productFields = await fetchImportedProductState(productId);
+
+  // Check for missing fields
+  const missing = [];
+  if (!productFields.title || productFields.title.trim() === '') missing.push('title');
+  if (!productFields.desc || productFields.desc.trim() === '') missing.push('desc');
+  if (!productFields.short_desc || productFields.short_desc.trim() === '') missing.push('short_desc');
+  if (!productFields.image_count || parseInt(productFields.image_count, 10) <= 0) missing.push('images');
+
+  if (missing.length > 0) {
+    throw new Error(`Import incomplete after worker run; missing ${missing.join(', ')}.`);
+  }
+
+  // Log enrichment status
+  log('enriched via worker', { productId, images: productFields.image_count });
+
   await postSignedCallback({
     job_id: job.job_id || '',
     feature_key: feature,
     status: 'done',
     staging_id: parseInt(stagingId, 10),
     product_id: productId,
+    enriched_fields: ['title', 'desc', 'short_desc'].filter((k) => {
+      return productFields[k] && String(productFields[k]).trim() !== '';
+    }),
+    image_count: parseInt(productFields.image_count, 10) || 0,
+    missing_fields: [],
   });
-  log('import completed', { staging_id: parseInt(stagingId, 10), product_id: productId });
+  log('import completed', { staging_id: parseInt(stagingId, 10), product_id: productId, images: productFields.image_count });
 }
 
 async function start() {
@@ -200,7 +237,7 @@ async function start() {
   await ch.prefetch(PREFETCH);
 
   await pingStatus();
-  setInterval(pingStatus, 60000).unref();
+  setInterval(pingStatus, STATUS_PING_INTERVAL_MS).unref();
 
   for (const queue of QUEUES) {
     await ch.assertQueue(queue, { durable: true });
