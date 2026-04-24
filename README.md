@@ -16,10 +16,11 @@ Then edit `/opt/catasync-worker/.env` and register the same `WORKER_NAME` and `W
 - `RABBITMQ_URL`: RabbitMQ connection string.
 - `QUEUES`: comma-separated queue names, usually `catasyncimportexecute`.
 - `WP_CALLBACK_URL`: `https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_callback`
+- `WP_EXECUTE_URL` (optional): `https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_execute` (derived from callback URL if omitted).
 - `WORKER_SECRET`: shared secret for signed callbacks and pings.
 - `WORKER_NAME`: worker domain/name registered in CataSync.
-- `WP_PATH`: WordPress root path available to this worker.
-- `WP_BIN`: wp-cli binary, usually `wp`.
+
+This worker does not require local WordPress files. It performs imports by calling signed CataSync AJAX endpoints.
 
 ## Operations
 

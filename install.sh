@@ -57,17 +57,14 @@ PREFETCH=1
 
 # WordPress callback endpoints.
 WP_CALLBACK_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_callback
+# Optional remote execution endpoint. By default this is derived from WP_CALLBACK_URL.
+WP_EXECUTE_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_execute
 # Optional override. By default this is derived from WP_CALLBACK_URL.
 WP_STATUS_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_worker_status_ping
 
 # Must match the worker secret registered in CataSync Settings > Workers.
 WORKER_SECRET=change-me
 WORKER_NAME=
-
-# WordPress CLI access. Worker boxes must have wp-cli and access to this WordPress install/DB.
-WP_BIN=wp
-WP_PATH=/var/www/html
-IMPORT_TIMEOUT_MS=1200000
 
 # Optional future enrichment settings. Keep blank unless the worker code uses them.
 OPENAI_API_KEY=
@@ -114,7 +111,7 @@ systemctl restart "$SERVICE_NAME"
 
 echo ""
 echo "[INFO] Install complete."
-echo "[NEXT] Edit $WORKER_DIR/.env with RabbitMQ, callback URL, worker secret, and WP_PATH."
+echo "[NEXT] Edit $WORKER_DIR/.env with RabbitMQ, callback URL, execute URL, and worker secret."
 echo "[NEXT] Register WORKER_NAME + WORKER_SECRET in CataSync Settings > Workers."
 echo "[NEXT] Check status: systemctl status $SERVICE_NAME"
 echo "[NEXT] Watch logs: journalctl -u $SERVICE_NAME -f"

@@ -4,42 +4,14 @@ const amqp = require('amqplib');
 const axios = require('axios');
 const crypto = require('crypto');
 const os = require('os');
-const path = require('path');
-const { execFile } = require('child_process');
-const { OpenAI } = require('openai');
-// OpenAI API setup
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo'; // cost-effective default
-let openai = null;
-if (OPENAI_API_KEY) {
-  openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-}
-
-async function runOpenAICompletion(prompt, opts = {}) {
-  if (!openai) throw new Error('OpenAI API key not set');
-  const model = opts.model || OPENAI_MODEL;
-  const messages = opts.messages || [
-    { role: 'system', content: 'You are a helpful assistant.' },
-    { role: 'user', content: prompt },
-  ];
-  const response = await openai.chat.completions.create({
-    model,
-    messages,
-    max_tokens: opts.max_tokens || 512,
-    temperature: opts.temperature || 0.7,
-  });
-  return response.choices[0]?.message?.content || '';
-}
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL;
 const QUEUES = (process.env.QUEUES || '').split(',').map((q) => q.trim()).filter(Boolean);
 const WP_CALLBACK_URL = process.env.WP_CALLBACK_URL;
 const WP_STATUS_URL = process.env.WP_STATUS_URL || (WP_CALLBACK_URL || '').replace(/action=[^&]+/, 'action=catasync_worker_status_ping');
+const WP_EXECUTE_URL = process.env.WP_EXECUTE_URL || (WP_CALLBACK_URL || '').replace(/action=[^&]+/, 'action=catasync_offload_execute');
 const WORKER_SECRET = process.env.WORKER_SECRET;
 const WORKER_NAME = process.env.WORKER_NAME || os.hostname() || 'catasync-worker';
-const WP_PATH = path.resolve(__dirname, process.env.WP_PATH || '../public_html');
-const WP_BIN = process.env.WP_BIN || 'wp';
-const IMPORT_TIMEOUT_MS = parseInt(process.env.IMPORT_TIMEOUT_MS || String(20 * 60 * 1000), 10);
 const PREFETCH = Math.max(1, parseInt(process.env.PREFETCH || '1', 10));
 const STATUS_PING_INTERVAL_MS = Math.max(3000, parseInt(process.env.STATUS_PING_INTERVAL_MS || '5000', 10));
 let currentProcess = '';
@@ -64,13 +36,17 @@ function signBody(body) {
   };
 }
 
-async function postSignedCallback(payload) {
+async function postSignedJson(url, payload, timeoutMs = 30000) {
   const body = JSON.stringify({ domain: WORKER_NAME, ...payload });
-  return axios.post(WP_CALLBACK_URL, body, {
+  return axios.post(url, body, {
     headers: signBody(body),
-    timeout: 30000,
+    timeout: timeoutMs,
     validateStatus: (status) => status >= 200 && status < 300,
   });
+}
+
+async function postSignedCallback(payload) {
+  return postSignedJson(WP_CALLBACK_URL, payload, 30000);
 }
 
 async function pingStatus() {
@@ -93,51 +69,24 @@ async function pingStatus() {
   }
 }
 
-function wpEval(code) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      WP_BIN,
-      [`--path=${WP_PATH}`, 'eval', code],
-      { timeout: IMPORT_TIMEOUT_MS, maxBuffer: 1024 * 1024 },
-      (error, stdout, stderr) => {
-        if (error) {
-          error.stdout = stdout;
-          error.stderr = stderr;
-          reject(error);
-          return;
-        }
-        resolve({ stdout, stderr });
-      }
-    );
-  });
-}
-
 async function importStagingId(stagingId) {
   const sid = parseInt(stagingId, 10);
   if (!sid || sid <= 0) {
     throw new Error('Missing staging_id for import.');
   }
-
-  const code = `
-    $sid = ${sid};
-    if ( ! class_exists( '\\CataSync\\Product_Importer' ) ) {
-      fwrite( STDERR, 'CataSync Product_Importer is not loaded.' );
-      exit( 10 );
-    }
-    $res = \\CataSync\\Product_Importer::import_staging_id( $sid );
-    if ( is_wp_error( $res ) ) {
-      fwrite( STDERR, $res->get_error_code() . ': ' . $res->get_error_message() );
-      exit( 20 );
-    }
-    echo (int) $res;
-  `;
-
-  const result = await wpEval(code);
-  const productId = parseInt(String(result.stdout || '').trim(), 10);
+  const response = await postSignedJson(WP_EXECUTE_URL, { staging_id: sid }, 1200000);
+  const data = response && response.data && response.data.data ? response.data.data : {};
+  const productId = parseInt(String(data.product_id || 0), 10);
   if (!productId || productId <= 0) {
-    throw new Error(`Importer returned invalid product id: ${String(result.stdout || '').trim()}`);
+    throw new Error('Remote execute endpoint did not return a valid product id.');
   }
-  return productId;
+  return {
+    productId,
+    title: String(data.title || ''),
+    desc: String(data.desc || ''),
+    shortDesc: String(data.short_desc || ''),
+    imageCount: parseInt(String(data.image_count || 0), 10) || 0,
+  };
 }
 
 function parseJob(content) {
@@ -157,36 +106,6 @@ function describeJob(queue, job) {
   return `${feature} on ${queue}`;
 }
 
-async function fetchImportedProductState(productId) {
-  const pid = parseInt(productId, 10);
-  if (!pid || pid <= 0) {
-    throw new Error('Missing product id for post-import validation.');
-  }
-
-  const code = `
-    $pid = ${pid};
-    $p = get_post( $pid );
-    if ( ! $p || 'product' !== $p->post_type ) {
-      fwrite( STDERR, 'Imported product not found.' );
-      exit( 30 );
-    }
-    $thumb = (int) get_post_thumbnail_id( $pid );
-    $gallery_raw = (string) get_post_meta( $pid, '_product_image_gallery', true );
-    $gallery = array_values( array_filter( array_map( 'intval', explode( ',', $gallery_raw ) ) ) );
-    echo wp_json_encode( array(
-      'title' => get_the_title( $pid ),
-      'desc' => (string) $p->post_content,
-      'short_desc' => (string) $p->post_excerpt,
-      'thumbnail_id' => $thumb,
-      'gallery_count' => count( $gallery ),
-      'image_count' => ( $thumb > 0 ? 1 : 0 ) + count( $gallery ),
-    ) );
-  `;
-
-  const result = await wpEval(code);
-  return JSON.parse(result.stdout || '{}');
-}
-
 async function handleJob(queue, job) {
   const feature = String(job.feature_key || job.type || '');
   if (feature !== 'wave.import.execute' && feature !== 'waveimportexecute') {
@@ -197,38 +116,40 @@ async function handleJob(queue, job) {
   const stagingId = job.payload && job.payload.staging_id;
   currentProcess = `Import staging #${stagingId}: enrich and create product`;
   await pingStatus();
-  const productId = await importStagingId(stagingId);
+  const imported = await importStagingId(stagingId);
   currentProcess = `Import staging #${stagingId}: validate enrichment and images`;
   await pingStatus();
-  const productFields = await fetchImportedProductState(productId);
 
   // Check for missing fields
   const missing = [];
-  if (!productFields.title || productFields.title.trim() === '') missing.push('title');
-  if (!productFields.desc || productFields.desc.trim() === '') missing.push('desc');
-  if (!productFields.short_desc || productFields.short_desc.trim() === '') missing.push('short_desc');
-  if (!productFields.image_count || parseInt(productFields.image_count, 10) <= 0) missing.push('images');
+  if (!imported.title || imported.title.trim() === '') missing.push('title');
+  if (!imported.desc || imported.desc.trim() === '') missing.push('desc');
+  if (!imported.shortDesc || imported.shortDesc.trim() === '') missing.push('short_desc');
+  if (!imported.imageCount || imported.imageCount <= 0) missing.push('images');
 
   if (missing.length > 0) {
     throw new Error(`Import incomplete after worker run; missing ${missing.join(', ')}.`);
   }
 
   // Log enrichment status
-  log('enriched via worker', { productId, images: productFields.image_count });
+  log('enriched via worker', { productId: imported.productId, images: imported.imageCount });
 
   await postSignedCallback({
     job_id: job.job_id || '',
     feature_key: feature,
     status: 'done',
     staging_id: parseInt(stagingId, 10),
-    product_id: productId,
+    product_id: imported.productId,
     enriched_fields: ['title', 'desc', 'short_desc'].filter((k) => {
-      return productFields[k] && String(productFields[k]).trim() !== '';
+      if (k === 'short_desc') {
+        return imported.shortDesc && imported.shortDesc.trim() !== '';
+      }
+      return imported[k] && String(imported[k]).trim() !== '';
     }),
-    image_count: parseInt(productFields.image_count, 10) || 0,
+    image_count: imported.imageCount || 0,
     missing_fields: [],
   });
-  log('import completed', { staging_id: parseInt(stagingId, 10), product_id: productId, images: productFields.image_count });
+  log('import completed', { staging_id: parseInt(stagingId, 10), product_id: imported.productId, images: imported.imageCount });
 }
 
 async function start() {
@@ -280,7 +201,7 @@ async function start() {
     });
     log('listening', { queue });
   }
-  log('worker started', { queues: QUEUES, wp_path: WP_PATH, prefetch: PREFETCH });
+  log('worker started', { queues: QUEUES, execute_url: WP_EXECUTE_URL, prefetch: PREFETCH });
 }
 
 start().catch((err) => {
