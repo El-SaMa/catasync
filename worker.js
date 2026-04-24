@@ -14,6 +14,7 @@ const WORKER_SECRET = process.env.WORKER_SECRET;
 const WORKER_NAME = process.env.WORKER_NAME || os.hostname() || 'catasync-worker';
 const PREFETCH = Math.max(1, parseInt(process.env.PREFETCH || '1', 10));
 const STATUS_PING_INTERVAL_MS = Math.max(3000, parseInt(process.env.STATUS_PING_INTERVAL_MS || '5000', 10));
+const CALLBACK_TIMEOUT_MS = Math.max(5000, parseInt(process.env.CALLBACK_TIMEOUT_MS || '120000', 10));
 let currentProcess = '';
 
 if (!RABBITMQ_URL || !QUEUES.length || !WP_CALLBACK_URL || !WORKER_SECRET) {
@@ -46,7 +47,9 @@ async function postSignedJson(url, payload, timeoutMs = 30000) {
 }
 
 async function postSignedCallback(payload) {
-  return postSignedJson(WP_CALLBACK_URL, payload, 30000);
+  const requested = payload && payload.callback_timeout_ms ? parseInt(String(payload.callback_timeout_ms), 10) : 0;
+  const callbackTimeoutMs = Math.max(5000, requested > 0 ? requested : CALLBACK_TIMEOUT_MS);
+  return postSignedJson(WP_CALLBACK_URL, payload, callbackTimeoutMs);
 }
 
 async function pingStatus() {
@@ -140,6 +143,7 @@ async function handleJob(queue, job) {
     status: 'done',
     staging_id: parseInt(stagingId, 10),
     product_id: imported.productId,
+    callback_timeout_ms: parseInt(String(job.callback_timeout_ms || 0), 10) || CALLBACK_TIMEOUT_MS,
     enriched_fields: ['title', 'desc', 'short_desc'].filter((k) => {
       if (k === 'short_desc') {
         return imported.shortDesc && imported.shortDesc.trim() !== '';
@@ -185,6 +189,7 @@ async function start() {
               feature_key: job.feature_key || '',
               status: 'failed',
               staging_id: stagingId,
+              callback_timeout_ms: parseInt(String((job && job.callback_timeout_ms) || 0), 10) || CALLBACK_TIMEOUT_MS,
               error: err.stderr || err.message || 'Worker import failed.',
             });
           } catch (callbackErr) {

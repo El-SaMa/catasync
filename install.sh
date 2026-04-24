@@ -61,6 +61,7 @@ WP_CALLBACK_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offl
 WP_EXECUTE_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_execute
 # Optional override. By default this is derived from WP_CALLBACK_URL.
 WP_STATUS_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_worker_status_ping
+CALLBACK_TIMEOUT_MS=120000
 
 # Must match the worker secret registered in CataSync Settings > Workers.
 WORKER_SECRET=change-me
