@@ -4,3 +4,4 @@
 *.log
 node_modules/
 npm-debug.log*
+LOCAL_OPS_NOTES.md

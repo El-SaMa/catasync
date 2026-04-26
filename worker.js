@@ -14,8 +14,11 @@ const WORKER_SECRET = process.env.WORKER_SECRET;
 const WORKER_NAME = process.env.WORKER_NAME || os.hostname() || 'catasync-worker';
 const PREFETCH = Math.max(1, parseInt(process.env.PREFETCH || '1', 10));
 const STATUS_PING_INTERVAL_MS = Math.max(3000, parseInt(process.env.STATUS_PING_INTERVAL_MS || '5000', 10));
+const STATUS_PING_TIMEOUT_MS = Math.max(5000, parseInt(process.env.STATUS_PING_TIMEOUT_MS || '30000', 10));
 const CALLBACK_TIMEOUT_MS = Math.max(5000, parseInt(process.env.CALLBACK_TIMEOUT_MS || '120000', 10));
 let currentProcess = '';
+let lastCpuUsage = process.cpuUsage();
+let lastCpuCheckAtMs = Date.now();
 
 if (!RABBITMQ_URL || !QUEUES.length || !WP_CALLBACK_URL || !WORKER_SECRET) {
   console.error('Missing required .env config: RABBITMQ_URL, QUEUES, WP_CALLBACK_URL, WORKER_SECRET.');
@@ -56,17 +59,40 @@ async function pingStatus() {
   if (!WP_STATUS_URL) {
     return;
   }
+  const nowMs = Date.now();
+  const cpuNow = process.cpuUsage();
+  const deltaUser = cpuNow.user - lastCpuUsage.user;
+  const deltaSystem = cpuNow.system - lastCpuUsage.system;
+  const deltaCpuMicros = Math.max(0, deltaUser + deltaSystem);
+  const deltaWallMs = Math.max(1, nowMs - lastCpuCheckAtMs);
+  const processCpuPercent = Math.max(0, (deltaCpuMicros / (deltaWallMs * 1000)) * 100);
+  lastCpuUsage = cpuNow;
+  lastCpuCheckAtMs = nowMs;
+
+  const mem = process.memoryUsage();
+  const processRamMb = (mem.rss || 0) / (1024 * 1024);
+  const processRamPercent = (processRamMb * 1024 * 1024 / Math.max(1, os.totalmem())) * 100;
+
   const params = new URLSearchParams();
   params.set('worker', WORKER_NAME);
   params.set('secret', WORKER_SECRET);
+  // Backward-compatible fields kept for older plugin versions.
   params.set('cpu', String(os.loadavg()[0] || 0));
-  params.set('ram', String((os.totalmem() - os.freemem()) / Math.max(1, os.totalmem())));
+  const ramRatio = (os.totalmem() - os.freemem()) / Math.max(1, os.totalmem());
+  params.set('ram', String(ramRatio));
+  params.set('ram_percent', String(Math.round(ramRatio * 100)));
+  // Accurate process-level metrics for worker dashboard.
+  params.set('process_cpu_percent', String(processCpuPercent));
+  params.set('process_ram_mb', String(processRamMb));
+  params.set('process_ram_percent', String(processRamPercent));
+  params.set('host_load1', String(os.loadavg()[0] || 0));
+  params.set('host_ram_percent', String(Math.round(ramRatio * 100)));
   params.set('running', currentProcess ? '1' : '0');
   params.set('process', currentProcess);
   params.set('current_process', currentProcess);
   params.set('currentProcess', currentProcess);
   try {
-    await axios.post(WP_STATUS_URL, params, { timeout: 10000 });
+    await axios.post(WP_STATUS_URL, params, { timeout: STATUS_PING_TIMEOUT_MS });
   } catch (err) {
     log('status ping failed', { error: err.message });
   }
@@ -109,10 +135,46 @@ function describeJob(queue, job) {
   return `${feature} on ${queue}`;
 }
 
+function isKnownFeature(feature) {
+  return [
+    'wave.import.execute',
+    'waveimportexecute',
+    'wave.import.enrich',
+    'waveimportenrich',
+    'wave.sync.reprice',
+    'wavesyncreprice',
+    'wave.reports.generate',
+    'wavereportsgenerate',
+    'wave.maintenance.backfill',
+    'wavemaintenancebackfill',
+    'wave.search.typesense.index',
+    'wavesearchtypesenseindex',
+  ].includes(feature);
+}
+
 async function handleJob(queue, job) {
   const feature = String(job.feature_key || job.type || '');
-  if (feature !== 'wave.import.execute' && feature !== 'waveimportexecute') {
+  if (!isKnownFeature(feature)) {
     log('unsupported job acknowledged', { queue, feature });
+    return;
+  }
+
+  if (feature !== 'wave.import.execute' && feature !== 'waveimportexecute') {
+    await postSignedJson(WP_EXECUTE_URL, {
+      feature_key: feature,
+      payload: job.payload && typeof job.payload === 'object' ? job.payload : {},
+      job_id: job.job_id || '',
+      callback_timeout_ms: parseInt(String(job.callback_timeout_ms || 0), 10) || CALLBACK_TIMEOUT_MS,
+    }, 1200000);
+
+    await postSignedCallback({
+      job_id: job.job_id || '',
+      feature_key: feature,
+      status: 'done',
+      payload: job.payload && typeof job.payload === 'object' ? job.payload : {},
+      callback_timeout_ms: parseInt(String(job.callback_timeout_ms || 0), 10) || CALLBACK_TIMEOUT_MS,
+    });
+    log('feature completed', { feature_key: feature, queue });
     return;
   }
 

@@ -10,6 +10,16 @@ REPO_URL="${REPO_URL:-https://github.com/El-SaMa/catasync.git}"
 SERVICE_NAME="${SERVICE_NAME:-catasync-worker}"
 SERVICE_USER="${SERVICE_USER:-catasync-worker}"
 
+required_env_keys=(
+  "RABBITMQ_URL"
+  "QUEUES"
+  "WP_CALLBACK_URL"
+  "WP_EXECUTE_URL"
+  "WP_STATUS_URL"
+  "WORKER_SECRET"
+  "WORKER_NAME"
+)
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "[ERROR] Run as root, e.g. curl -fsSL .../install.sh | sudo bash" >&2
   exit 1
@@ -61,6 +71,8 @@ WP_CALLBACK_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offl
 WP_EXECUTE_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_execute
 # Optional override. By default this is derived from WP_CALLBACK_URL.
 WP_STATUS_URL=https://example.com/wp-admin/admin-ajax.php?action=catasync_worker_status_ping
+STATUS_PING_INTERVAL_MS=5000
+STATUS_PING_TIMEOUT_MS=30000
 CALLBACK_TIMEOUT_MS=120000
 
 # Must match the worker secret registered in CataSync Settings > Workers.
@@ -74,6 +86,31 @@ EOF
   chmod 600 .env
 else
   echo "[INFO] .env already exists; leaving it untouched."
+fi
+
+echo "[INFO] Validating .env ..."
+for key in "${required_env_keys[@]}"; do
+  if ! grep -q "^${key}=" .env; then
+    echo "[ERROR] Missing ${key} in $WORKER_DIR/.env" >&2
+    exit 1
+  fi
+done
+
+if grep -qE '^RABBITMQ_URL=amqp://user:pass@rabbit-host:5672/catasync$' .env; then
+  echo "[ERROR] .env still has placeholder RABBITMQ_URL." >&2
+  exit 1
+fi
+if grep -qE '^WP_CALLBACK_URL=https://example.com/' .env; then
+  echo "[ERROR] .env still has placeholder WP_CALLBACK_URL." >&2
+  exit 1
+fi
+if grep -qE '^WORKER_SECRET=(change-me|CHANGE_ME|changeme)?$' .env; then
+  echo "[ERROR] .env still has placeholder WORKER_SECRET." >&2
+  exit 1
+fi
+if grep -qE '^WORKER_NAME=(worker.example.com)?$' .env; then
+  echo "[ERROR] .env still has placeholder WORKER_NAME." >&2
+  exit 1
 fi
 
 chown -R "$SERVICE_USER:$SERVICE_USER" "$WORKER_DIR"

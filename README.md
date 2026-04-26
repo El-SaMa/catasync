@@ -17,6 +17,9 @@ Then edit `/opt/catasync-worker/.env` and register the same `WORKER_NAME` and `W
 - `QUEUES`: comma-separated queue names, usually `catasyncimportexecute`.
 - `WP_CALLBACK_URL`: `https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_callback`
 - `WP_EXECUTE_URL` (optional): `https://example.com/wp-admin/admin-ajax.php?action=catasync_offload_execute` (derived from callback URL if omitted).
+- `WP_STATUS_URL` (optional): `https://example.com/wp-admin/admin-ajax.php?action=catasync_worker_status_ping` (derived from callback URL if omitted).
+- `STATUS_PING_INTERVAL_MS` (optional): worker heartbeat interval in milliseconds (default `5000`).
+- `STATUS_PING_TIMEOUT_MS` (optional): status ping HTTP timeout in milliseconds (default `30000`).
 - `CALLBACK_TIMEOUT_MS` (optional): callback timeout in milliseconds (default `120000`).
 - `WORKER_SECRET`: shared secret for signed callbacks and pings.
 - `WORKER_NAME`: worker domain/name registered in CataSync.
