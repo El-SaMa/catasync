@@ -1,7 +1,7 @@
 {
   "name": "catasync-worker",
-  "version": "1.0.0",
-  "description": "Node.js worker for CataSync offload/enrichment.",
+  "version": "1.0.2",
+  "description": "Local Node.js worker for CataSync offload/enrichment via wp-cli.",
   "main": "worker.js",
   "scripts": {
     "start": "node worker.js"
